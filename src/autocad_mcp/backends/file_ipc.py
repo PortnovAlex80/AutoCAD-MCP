@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -380,6 +381,28 @@ def _com_point(value) -> list[float] | None:
 
 def _distance_2d(first, second) -> float:
     return math.hypot(float(second[0]) - float(first[0]), float(second[1]) - float(first[1]))
+
+
+def _shoelace_area(points) -> float:
+    """Enclosed area of a 2D polygon (mirrors EzdxfBackend._shoelace_area)."""
+    total = 0.0
+    count = len(points)
+    for index in range(count):
+        x1, y1 = points[index][0], points[index][1]
+        x2, y2 = points[(index + 1) % count][0], points[(index + 1) % count][1]
+        total += x1 * y2 - x2 * y1
+    return abs(total) / 2.0
+
+
+# Numeric DIMSTYLE fields this backend accepts for dimstyle_create; mirrors
+# EzdxfBackend._DIMSTYLE_NUMERIC_FIELDS so both backends agree on the contract.
+DIMSTYLE_NUMERIC_FIELDS = frozenset(
+    {
+        "dimtxt", "dimasz", "dimexe", "dimexo", "dimgap", "dimtad", "dimjust",
+        "dimdec", "dimlfac", "dimscale", "dimclrd", "dimclre", "dimclrt",
+        "dimtih", "dimtoh", "dimsd1", "dimsd2", "dimlwd", "dimlwe",
+    }
+)
 
 
 def _com_entity_to_dict(entity) -> dict:
@@ -2295,14 +2318,20 @@ class FileIPCBackend(AutoCADBackend):
             failure.payload["dispatcher_fallback"] = result.to_dict()
             return failure
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(self, path: str, version: str | None = None) -> CommandResult:
+        # The COM export path always writes the AutoCAD-native DXF revision;
+        # `version` is accepted for backend parity and reported in the payload.
         try:
             actual = self._export_dxf_via_com(path)
             return CommandResult(
                 ok=True,
                 payload={
                     **actual,
-                    "requested": {"path": str(Path(path).expanduser().resolve()), "format": "dxf"},
+                    "requested": {
+                        "path": str(Path(path).expanduser().resolve()),
+                        "format": "dxf",
+                        "version": version,
+                    },
                     "actual": actual,
                     "diff": [],
                 },
@@ -4258,6 +4287,321 @@ class FileIPCBackend(AutoCADBackend):
                 verification="AutoCAD accepted the native GEOMCONSTRAINT command; the ActiveX API does not expose a portable constraint collection.",
             )
         return result
+
+    # --- Spline / selection / explode (live AutoCAD via LISP dispatcher) ---
+
+    async def create_spline(
+        self,
+        points: list[list[float]],
+        layer: str | None = None,
+        degree: int = 3,
+        closed: bool = False,
+    ) -> CommandResult:
+        # ActiveX AddSpline builds the curve through fit points; AutoCAD picks
+        # the degree itself and the LISP side reports the actual value back.
+        del degree
+        if not points or len(points) < 3:
+            return CommandResult(ok=False, error="spline requires at least three fit points")
+        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        return await self._dispatch(
+            "create-spline",
+            {"points_str": pts_str, "layer": layer, "closed": "1" if closed else "0"},
+        )
+
+    async def entity_select(self, filters: dict[str, Any]) -> CommandResult:
+        """Read-only selection by type/layer/window filters; returns handles."""
+        filters = filters or {}
+        entity_type = str(filters.get("type", "") or "").upper()
+        layer = filters.get("layer")
+        window = filters.get("window")
+        try:
+            limit = int(filters.get("limit", 200))
+        except (TypeError, ValueError):
+            return CommandResult(ok=False, error="limit must be an integer")
+        if limit < 1 or limit > 1000:
+            return CommandResult(ok=False, error="limit must be in [1, 1000]")
+        window_box = None
+        if window:
+            if not isinstance(window, (list, tuple)) or len(window) != 4:
+                return CommandResult(
+                    ok=False,
+                    error="window must be [x1, y1, x2, y2]",
+                    error_code="E_PARAMETER_REJECTED",
+                )
+            window_box = (
+                min(window[0], window[2]),
+                min(window[1], window[3]),
+                max(window[0], window[2]),
+                max(window[1], window[3]),
+            )
+        window_str = ",".join(str(value) for value in window_box) if window_box else None
+        return await self._dispatch(
+            "entity-select",
+            {
+                "type": entity_type or None,
+                "layer": layer,
+                "window_str": window_str,
+                "limit": limit,
+            },
+        )
+
+    async def entity_explode(self, entity_id: str) -> CommandResult:
+        """Explode via vla-Explode; the original is deleted like the ezdxf backend."""
+        return await self._dispatch("entity-explode", {"entity_id": entity_id})
+
+    # --- Inquiry (read-only measurements) ---
+
+    async def inquiry_distance(self, p1: list[float], p2: list[float]) -> CommandResult:
+        try:
+            dx = float(p2[0]) - float(p1[0])
+            dy = float(p2[1]) - float(p1[1])
+        except (TypeError, ValueError, IndexError):
+            return CommandResult(ok=False, error="p1 and p2 must be [x, y] points")
+        return CommandResult(
+            ok=True,
+            payload={
+                "p1": [float(p1[0]), float(p1[1])],
+                "p2": [float(p2[0]), float(p2[1])],
+                "dx": dx,
+                "dy": dy,
+                "distance": math.hypot(dx, dy),
+                "angle": math.degrees(math.atan2(dy, dx)) % 360,
+            },
+        )
+
+    async def inquiry_angle(
+        self, vertex: list[float], p1: list[float], p2: list[float]
+    ) -> CommandResult:
+        try:
+            a1 = math.atan2(float(p1[1]) - float(vertex[1]), float(p1[0]) - float(vertex[0]))
+            a2 = math.atan2(float(p2[1]) - float(vertex[1]), float(p2[0]) - float(vertex[0]))
+        except (TypeError, ValueError, IndexError):
+            return CommandResult(ok=False, error="vertex, p1, p2 must be [x, y] points")
+        angle = math.degrees(a2 - a1) % 360
+        return CommandResult(
+            ok=True,
+            payload={
+                "vertex": [float(vertex[0]), float(vertex[1])],
+                "angle": angle,
+                "angle_acute": min(angle, 360 - angle),
+            },
+        )
+
+    async def inquiry_length(self, entity_id: str) -> CommandResult:
+        return await self._dispatch("measure-length", {"entity_id": entity_id})
+
+    async def inquiry_area(
+        self,
+        entity_id: str | None = None,
+        points: list[list[float]] | None = None,
+    ) -> CommandResult:
+        if points:
+            if len(points) < 3:
+                return CommandResult(ok=False, error="area requires at least three points")
+            return CommandResult(
+                ok=True,
+                payload={
+                    "source": "points",
+                    "count": len(points),
+                    "area": _shoelace_area(points),
+                },
+            )
+        if not entity_id:
+            return CommandResult(ok=False, error="area requires entity_id or points")
+        result = await self._dispatch("measure-area", {"entity_id": entity_id})
+        if result.ok and isinstance(result.payload, dict):
+            result.payload["source"] = "entity"
+        return result
+
+    async def inquiry_bbox(
+        self, entity_id: str | None = None, layer: str | None = None
+    ) -> CommandResult:
+        return await self._dispatch("bbox", {"entity_id": entity_id, "layer": layer})
+
+    async def inquiry_summary(self) -> CommandResult:
+        return await self._dispatch("summary", {})
+
+    # --- Styles (text, dimension, linetype) ---
+
+    async def textstyle_list(self) -> CommandResult:
+        return await self._dispatch("textstyle-list", {})
+
+    async def textstyle_create(
+        self,
+        name: str,
+        font: str = "arial.ttf",
+        fixed_height: float | None = None,
+    ) -> CommandResult:
+        if fixed_height is not None and fixed_height < 0:
+            return CommandResult(ok=False, error="fixed_height must be non-negative")
+        return await self._dispatch(
+            "textstyle-create",
+            {"name": name, "font": font, "fixed_height": fixed_height},
+        )
+
+    async def textstyle_set_current(self, name: str) -> CommandResult:
+        return await self._dispatch("textstyle-set-current", {"name": name})
+
+    async def dimstyle_list(self) -> CommandResult:
+        return await self._dispatch("dimstyle-list", {})
+
+    async def dimstyle_create(
+        self, name: str, values: dict[str, Any] | None = None
+    ) -> CommandResult:
+        applied: dict[str, float] = {}
+        rejected: list[str] = []
+        pairs: list[str] = []
+        for key, value in (values or {}).items():
+            normalized = str(key).lower()
+            if normalized not in DIMSTYLE_NUMERIC_FIELDS:
+                rejected.append(str(key))
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                rejected.append(str(key))
+                continue
+            pairs.append(f"{normalized}={numeric}")
+            applied[normalized] = numeric
+        result = await self._dispatch(
+            "dimstyle-create",
+            {"name": name, "values_str": ";".join(pairs) if pairs else None},
+        )
+        if result.ok and isinstance(result.payload, dict):
+            remote_rejected = [str(item) for item in (result.payload.get("rejected") or [])]
+            merged = sorted({*rejected, *remote_rejected})
+            if merged:
+                result.payload["rejected"] = merged
+        return result
+
+    async def dimstyle_set_current(self, name: str) -> CommandResult:
+        return await self._dispatch("dimstyle-set-current", {"name": name})
+
+    async def linetype_list(self) -> CommandResult:
+        return await self._dispatch("linetype-list", {})
+
+    # --- Layouts (paper space) ---
+
+    async def layout_list(self) -> CommandResult:
+        return await self._dispatch("layout-list", {})
+
+    async def layout_create(self, name: str) -> CommandResult:
+        return await self._dispatch("layout-create", {"name": name})
+
+    async def layout_set_current(self, name: str) -> CommandResult:
+        return await self._dispatch("layout-set-current", {"name": name})
+
+    async def layout_add_viewport(
+        self,
+        layout: str,
+        center: list[float],
+        width: float,
+        height: float,
+        view_center: list[float],
+        view_height: float,
+        layer: str | None = None,
+    ) -> CommandResult:
+        if width <= 0 or height <= 0 or view_height <= 0:
+            return CommandResult(ok=False, error="width, height and view_height must be positive")
+        # AddPViewport + CustomScale + Display; view_center is reported for
+        # payload parity but AutoCAD does not take it in the Add call.
+        return await self._dispatch(
+            "layout-add-viewport",
+            {
+                "layout": layout,
+                "center_x": center[0],
+                "center_y": center[1],
+                "width": width,
+                "height": height,
+                "view_center_x": view_center[0],
+                "view_center_y": view_center[1],
+                "view_height": view_height,
+                "layer": layer,
+            },
+        )
+
+    # --- Tables (native ActiveX tables) ---
+
+    async def table_create(
+        self,
+        x: float,
+        y: float,
+        rows: int,
+        cols: int,
+        row_height: float = 1.0,
+        col_width: float = 10.0,
+        title: str | None = None,
+        cells: list[list[str]] | None = None,
+        layer: str | None = None,
+    ) -> CommandResult:
+        if rows < 1 or rows > 100 or cols < 1 or cols > 26:
+            return CommandResult(
+                ok=False,
+                error="table size must be rows in [1, 100] and cols in [1, 26]",
+                error_code="E_PARAMETER_REJECTED",
+            )
+        if row_height <= 0 or col_width <= 0:
+            return CommandResult(ok=False, error="row_height and col_width must be positive")
+        if cells and len(cells) > rows:
+            return CommandResult(ok=False, error=f"cells has {len(cells)} rows, table has {rows}")
+        # IPC encoding: rows separated by ';', cells within a row by '|'.
+        cells_str = ";".join("|".join(str(cell) for cell in row) for row in (cells or []))
+        return await self._dispatch(
+            "table-create",
+            {
+                "x": x,
+                "y": y,
+                "rows": rows,
+                "cols": cols,
+                "row_height": row_height,
+                "col_width": col_width,
+                "title": title,
+                "cells_str": cells_str or None,
+                "layer": layer,
+            },
+        )
+
+    async def table_set_cell(
+        self, entity_id: str, row: int, col: int, text: str
+    ) -> CommandResult:
+        return await self._dispatch(
+            "table-set-cell",
+            {"entity_id": entity_id, "row": row, "col": col, "text": text},
+        )
+
+    async def table_set_col_widths(
+        self, entity_id: str, widths: list[float]
+    ) -> CommandResult:
+        widths_str = ";".join(str(float(width)) for width in widths)
+        return await self._dispatch(
+            "table-set-col-widths", {"entity_id": entity_id, "widths_str": widths_str}
+        )
+
+    async def table_set_row_heights(
+        self, entity_id: str, heights: list[float]
+    ) -> CommandResult:
+        heights_str = ";".join(str(float(height)) for height in heights)
+        return await self._dispatch(
+            "table-set-row-heights", {"entity_id": entity_id, "heights_str": heights_str}
+        )
+
+    # --- External references (command-based via native -XREF) ---
+
+    async def xref_list(self) -> CommandResult:
+        return await self._dispatch("xref-list", {})
+
+    async def xref_attach(
+        self, path: str, x: float = 0.0, y: float = 0.0, name: str | None = None
+    ) -> CommandResult:
+        return await self._dispatch(
+            "xref-attach", {"path": path, "x": x, "y": y, "name": name}
+        )
+
+    async def xref_detach(self, name: str) -> CommandResult:
+        return await self._dispatch("xref-detach", {"name": name})
+
+    async def xref_reload(self, name: str) -> CommandResult:
+        return await self._dispatch("xref-reload", {"name": name})
 
     def _verify_entity_changes(
         self, result: CommandResult, before: dict[str, dict], operation: str

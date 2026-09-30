@@ -514,6 +514,90 @@
     ((= cmd-name "pid-list-symbols")
      (mcp-cmd-pid-list-symbols params-json))
 
+    ;; --- Inquiry ---
+    ((= cmd-name "measure-length")
+     (mcp-cmd-measure-length params-json))
+
+    ((= cmd-name "measure-area")
+     (mcp-cmd-measure-area params-json))
+
+    ((= cmd-name "bbox")
+     (mcp-cmd-bbox params-json))
+
+    ((= cmd-name "summary")
+     (mcp-cmd-summary))
+
+    ;; --- Selection / spline / explode ---
+    ((= cmd-name "entity-select")
+     (mcp-cmd-entity-select params-json))
+
+    ((= cmd-name "create-spline")
+     (mcp-cmd-create-spline params-json))
+
+    ((= cmd-name "entity-explode")
+     (mcp-cmd-entity-explode params-json))
+
+    ;; --- Styles ---
+    ((= cmd-name "textstyle-list")
+     (mcp-cmd-textstyle-list))
+
+    ((= cmd-name "textstyle-create")
+     (mcp-cmd-textstyle-create params-json))
+
+    ((= cmd-name "textstyle-set-current")
+     (mcp-cmd-textstyle-set-current params-json))
+
+    ((= cmd-name "dimstyle-list")
+     (mcp-cmd-dimstyle-list))
+
+    ((= cmd-name "dimstyle-create")
+     (mcp-cmd-dimstyle-create params-json))
+
+    ((= cmd-name "dimstyle-set-current")
+     (mcp-cmd-dimstyle-set-current params-json))
+
+    ((= cmd-name "linetype-list")
+     (mcp-cmd-linetype-list))
+
+    ;; --- Layouts ---
+    ((= cmd-name "layout-list")
+     (mcp-cmd-layout-list))
+
+    ((= cmd-name "layout-create")
+     (mcp-cmd-layout-create params-json))
+
+    ((= cmd-name "layout-set-current")
+     (mcp-cmd-layout-set-current params-json))
+
+    ((= cmd-name "layout-add-viewport")
+     (mcp-cmd-layout-add-viewport params-json))
+
+    ;; --- Tables ---
+    ((= cmd-name "table-create")
+     (mcp-cmd-table-create params-json))
+
+    ((= cmd-name "table-set-cell")
+     (mcp-cmd-table-set-cell params-json))
+
+    ((= cmd-name "table-set-col-widths")
+     (mcp-cmd-table-set-col-widths params-json))
+
+    ((= cmd-name "table-set-row-heights")
+     (mcp-cmd-table-set-row-heights params-json))
+
+    ;; --- External references ---
+    ((= cmd-name "xref-list")
+     (mcp-cmd-xref-list))
+
+    ((= cmd-name "xref-attach")
+     (mcp-cmd-xref-attach params-json))
+
+    ((= cmd-name "xref-detach")
+     (mcp-cmd-xref-detach params-json))
+
+    ((= cmd-name "xref-reload")
+     (mcp-cmd-xref-reload params-json))
+
     ;; --- Unknown ---
     (t (cons nil (strcat "Unknown command: " cmd-name)))
   )
@@ -1592,6 +1676,1033 @@
       (cons T (strcat "{\"entity_type\":\"INSERT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
     )
     (cons nil (strcat "Block '" name "' not found"))
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; ActiveX (Visual LISP COM) helpers
+;; Every vla-* call below is wrapped in vl-catch-all-apply so a COM-less
+;; session (or an unsupported entity type) yields an honest JSON error.
+;; -----------------------------------------------------------------------
+
+(defun mcp-active-document ( / result)
+  "Return the ActiveDocument COM object, or nil when ActiveX is unavailable."
+  (vl-load-com)
+  (setq result (vl-catch-all-apply
+    '(lambda () (vla-get-ActiveDocument (vlax-get-acad-object)))
+    nil
+  ))
+  (if (vl-catch-all-error-p result) nil result)
+)
+
+(defun mcp-safe-string (value / )
+  "Normalize a vl-catch-all-apply result into a plain string."
+  (cond
+    ((null value) "")
+    ((vl-catch-all-error-p value) "")
+    ((= (type value) 'STR) value)
+    (t (vl-princ-to-string value))
+  )
+)
+
+(defun mcp-safe-real (value default)
+  "Normalize a vl-catch-all-apply result into a real number."
+  (cond
+    ((null value) default)
+    ((vl-catch-all-error-p value) default)
+    ((= (type value) 'REAL) value)
+    ((= (type value) 'INT) (float value))
+    ((= (type value) 'STR) (atof value))
+    (t default)
+  )
+)
+
+(defun mcp-object-type-name (obj / object-name short)
+  "Map an ActiveX ObjectName to the DXF-style entity type names used by ezdxf."
+  (setq object-name (mcp-safe-string (vl-catch-all-apply 'vla-get-ObjectName (list obj))))
+  (setq short
+    (if (and (> (strlen object-name) 4) (= (substr object-name 1 4) "AcDb"))
+      (substr object-name 5)
+      object-name
+    )
+  )
+  (cond
+    ((= short "Polyline") "LWPOLYLINE")
+    ((= short "2dPolyline") "POLYLINE")
+    ((= short "3dPolyline") "POLYLINE3D")
+    ((= short "BlockReference") "INSERT")
+    ((= short "MText") "MTEXT")
+    (t (strcase short))
+  )
+)
+
+(defun mcp-object-bbox (obj / minpt maxpt result)
+  "Return ((minx miny) (maxx maxy)) or nil when the object has no bounds."
+  (setq result (vl-catch-all-apply 'vla-getBoundingBox (list obj 'minpt 'maxpt)))
+  (if (vl-catch-all-error-p result)
+    nil
+    (list
+      (list (car (vlax-safearray->list minpt)) (cadr (vlax-safearray->list minpt)))
+      (list (car (vlax-safearray->list maxpt)) (cadr (vlax-safearray->list maxpt)))
+    )
+  )
+)
+
+(defun mcp-entity-bbox (ent / obj)
+  (if ent
+    (progn
+      (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+      (if (vl-catch-all-error-p obj) nil (mcp-object-bbox obj))
+    )
+    nil
+  )
+)
+
+(defun mcp-bbox-union (acc pair / bmin bmax)
+  "acc is (minx miny maxx maxy) or nil; pair is ((minx miny) (maxx maxy))."
+  (setq bmin (car pair) bmax (cadr pair))
+  (if (null acc)
+    (list (car bmin) (cadr bmin) (car bmax) (cadr bmax))
+    (list
+      (min (car acc) (car bmin))
+      (min (cadr acc) (cadr bmin))
+      (max (caddr acc) (car bmax))
+      (max (cadddr acc) (cadr bmax))
+    )
+  )
+)
+
+(defun mcp-bbox-json (entity-id layer-name count acc)
+  (strcat "{\"entity_id\":"
+    (if entity-id (strcat "\"" (mcp-escape-string entity-id) "\"") "null")
+    ",\"layer\":"
+    (if layer-name (strcat "\"" (mcp-escape-string layer-name) "\"") "null")
+    ",\"count\":" (itoa count)
+    ",\"min\":[" (rtos (car acc) 2 6) "," (rtos (cadr acc) 2 6) "]"
+    ",\"max\":[" (rtos (caddr acc) 2 6) "," (rtos (cadddr acc) 2 6) "]"
+    ",\"width\":" (rtos (- (caddr acc) (car acc)) 2 6)
+    ",\"height\":" (rtos (- (cadddr acc) (cadr acc)) 2 6)
+    "}"
+  )
+)
+
+(defun mcp-alist-inc (alist key / entry)
+  "Increment (or add) the counter for key in an (name . count) alist."
+  (setq entry (assoc key alist))
+  (if entry
+    (subst (cons key (1+ (cdr entry))) entry alist)
+    (append alist (list (cons key 1)))
+  )
+)
+
+(defun mcp-alist-json (alist / parts)
+  (setq parts "")
+  (foreach entry alist
+    (if (> (strlen parts) 0) (setq parts (strcat parts ",")))
+    (setq parts (strcat parts "\"" (mcp-escape-string (car entry)) "\":" (itoa (cdr entry))))
+  )
+  (strcat "{" parts "}")
+)
+
+(defun mcp-table-object (entity-id / ent obj)
+  "Resolve a handle to a COM object (used by native-table commands)."
+  (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
+  (if (not ent)
+    nil
+    (progn
+      (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+      (if (vl-catch-all-error-p obj) nil obj)
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; Inquiry commands
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-measure-length (params / entity-id ent end-param dist)
+  "Curve length via vlax-curve for any entity with a measurable length."
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
+  (cond
+    ((not ent) (cons nil (strcat "Entity not found: " entity-id)))
+    (t
+     (vl-load-com)
+     (setq end-param (vl-catch-all-apply 'vlax-curve-getEndParam (list ent)))
+     (cond
+       ((vl-catch-all-error-p end-param)
+        (cons nil (strcat "Entity has no measurable length: " (vl-catch-all-error-message end-param))))
+       (t
+        (setq dist (vl-catch-all-apply 'vlax-curve-getDistAtParam (list ent end-param)))
+        (if (vl-catch-all-error-p dist)
+          (cons nil (strcat "Length measurement failed: " (vl-catch-all-error-message dist)))
+          (cons T (strcat "{\"entity_id\":\"" (mcp-escape-string entity-id)
+                          "\",\"type\":\"" (cdr (assoc 0 (entget ent)))
+                          "\",\"length\":" (rtos dist 2 6) "}")))
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-measure-area (params / entity-id ent ent-data etype closed-flags obj area)
+  "Native area via vla-get-Area; open polylines are rejected like the ezdxf backend."
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
+  (cond
+    ((not ent) (cons nil (strcat "Entity not found: " entity-id)))
+    (t
+     (setq ent-data (entget ent))
+     (setq etype (cdr (assoc 0 ent-data)))
+     (setq closed-flags (if (assoc 70 ent-data) (cdr (assoc 70 ent-data)) 0))
+     (if (and (or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
+              (= 0 (logand 1 closed-flags)))
+       (cons nil (strcat etype " is not closed; enclosed area is undefined"))
+       (progn
+         (vl-load-com)
+         (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+         (cond
+           ((vl-catch-all-error-p obj)
+            (cons nil "ActiveX object unavailable for entity"))
+           (t
+            (setq area (vl-catch-all-apply 'vla-get-Area (list obj)))
+            (if (vl-catch-all-error-p area)
+              (cons nil (strcat "Area measurement failed: " (vl-catch-all-error-message area)))
+              (cons T (strcat "{\"entity_id\":\"" (mcp-escape-string entity-id)
+                              "\",\"type\":\"" etype
+                              "\",\"area\":" (rtos area 2 6) "}")))
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-bbox (params / entity-id layer-name ent doc mspace obj pair acc count)
+  "Bounding box of one entity (handle) or the model-space union for a layer."
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (setq layer-name (mcp-json-get-string params "layer"))
+  (if entity-id
+    (progn
+      (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
+      (cond
+        ((not ent) (cons nil (strcat "Entity not found: " entity-id)))
+        ((not (setq pair (mcp-entity-bbox ent)))
+         (cons nil "Entity has no geometry bounds"))
+        (t (cons T (mcp-bbox-json entity-id layer-name 1
+          (list (car (car pair)) (cadr (car pair)) (car (cadr pair)) (cadr (cadr pair))))))
+      )
+    )
+    (progn
+      (setq doc (mcp-active-document))
+      (if (not doc)
+        (cons nil "ActiveX document access unavailable")
+        (progn
+          (setq mspace (vla-get-ModelSpace doc))
+          (setq acc nil count 0)
+          (vlax-for obj mspace
+            (if (and (or (not layer-name)
+                         (= (strcase (mcp-safe-string (vl-catch-all-apply 'vla-get-Layer (list obj))))
+                            (strcase layer-name)))
+                     (setq pair (mcp-object-bbox obj)))
+              (progn
+                (setq acc (mcp-bbox-union acc pair))
+                (setq count (1+ count))
+              )
+            )
+          )
+          (if (= count 0)
+            (cons nil "No entities to measure")
+            (cons T (mcp-bbox-json entity-id layer-name count acc))
+          )
+        )
+      )
+    )
+  )
+)
+
+(defun mcp-cmd-summary ( / doc mspace obj etype elayer pair acc total by-type by-layer layers-table layers-json)
+  "Count model-space entities by type and layer plus overall extents."
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq mspace (vla-get-ModelSpace doc))
+      (setq total 0 acc nil by-type nil by-layer nil)
+      (vlax-for obj mspace
+        (setq etype (mcp-object-type-name obj))
+        (setq elayer (mcp-safe-string (vl-catch-all-apply 'vla-get-Layer (list obj))))
+        (setq by-type (mcp-alist-inc by-type etype))
+        (setq by-layer (mcp-alist-inc by-layer elayer))
+        (setq total (1+ total))
+        (if (setq pair (mcp-object-bbox obj))
+          (setq acc (mcp-bbox-union acc pair))
+        )
+      )
+      (setq layers-json "")
+      (setq layers-table (tblnext "LAYER" T))
+      (while layers-table
+        (if (> (strlen layers-json) 0) (setq layers-json (strcat layers-json ",")))
+        (setq layers-json (strcat layers-json "\"" (mcp-escape-string (cdr (assoc 2 layers-table))) "\""))
+        (setq layers-table (tblnext "LAYER"))
+      )
+      (cons T (strcat "{\"total\":" (itoa total)
+        ",\"by_type\":" (mcp-alist-json by-type)
+        ",\"by_layer\":" (mcp-alist-json by-layer)
+        ",\"layers\":[" layers-json "]"
+        (if acc
+          (strcat ",\"extents\":{\"min\":[" (rtos (car acc) 2 6) "," (rtos (cadr acc) 2 6)
+                  "],\"max\":[" (rtos (caddr acc) 2 6) "," (rtos (cadddr acc) 2 6) "]}")
+          "")
+        "}"))
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; Selection / spline / explode
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-entity-select (params / type-name layer-name window-str limit flt ss total idx ent ent-data
+                                           etype handle elayer matches collected truncated window-pair wx1 wy1 wx2 wy2 bbox keep)
+  "Read-only ssget \"_X\" scan with optional bounding-box window filter."
+  (setq type-name (mcp-json-get-string params "type"))
+  (setq layer-name (mcp-json-get-string params "layer"))
+  (setq window-str (mcp-json-get-string params "window_str"))
+  (setq limit (fix (mcp-json-get-number params "limit")))
+  (if (not limit) (setq limit 200))
+  (if window-str
+    (progn
+      (setq window-pair (mcp-split-string window-str ","))
+      (setq wx1 (atof (nth 0 window-pair)))
+      (setq wy1 (atof (nth 1 window-pair)))
+      (setq wx2 (atof (nth 2 window-pair)))
+      (setq wy2 (atof (nth 3 window-pair)))
+    )
+  )
+  (setq flt nil)
+  (if type-name (setq flt (cons (cons 0 type-name) flt)))
+  (if layer-name (setq flt (cons (cons 8 layer-name) flt)))
+  (vl-load-com)
+  (setq ss (ssget "_X" flt))
+  (setq total 0 collected 0 matches "" truncated nil)
+  (if ss (setq total (sslength ss)))
+  (if ss
+    (progn
+      (setq idx 0)
+      (while (< idx total)
+        (setq ent (ssname ss idx))
+        (setq idx (1+ idx))
+        (setq ent-data (entget ent))
+        (setq etype (cdr (assoc 0 ent-data)))
+        (setq handle (cdr (assoc 5 ent-data)))
+        (setq elayer (cdr (assoc 8 ent-data)))
+        (setq keep T)
+        (if window-str
+          (progn
+            (setq bbox (mcp-entity-bbox ent))
+            (if bbox
+              (setq keep (not (or (< (car (cadr bbox)) wx1)
+                                  (> (car (car bbox)) wx2)
+                                  (< (cadr (cadr bbox)) wy1)
+                                  (> (cadr (car bbox)) wy2))))
+              (setq keep nil)
+            )
+          )
+        )
+        (if keep
+          (progn
+            (if (< collected limit)
+              (progn
+                (if (> collected 0) (setq matches (strcat matches ",")))
+                (setq matches (strcat matches "{\"handle\":\"" handle "\",\"type\":\"" etype
+                                      "\",\"layer\":\"" (mcp-escape-string elayer) "\"}"))
+              )
+              (setq truncated T)
+            )
+            (setq collected (1+ collected))
+          )
+        )
+      )
+    )
+  )
+  (cons T (strcat "{\"entities\":[" matches "]"
+    ",\"count\":" (itoa (if (> collected limit) limit collected))
+    ",\"total_matching\":" (itoa total)
+    ",\"truncated\":" (if truncated "true" "false")
+    ",\"filters\":{\"type\":"
+    (if type-name (strcat "\"" (mcp-escape-string type-name) "\"") "null")
+    ",\"layer\":"
+    (if layer-name (strcat "\"" (mcp-escape-string layer-name) "\"") "null")
+    ",\"window\":"
+    (if window-str
+      (strcat "[" (rtos wx1 2 6) "," (rtos wy1 2 6) "," (rtos wx2 2 6) "," (rtos wy2 2 6) "]")
+      "null")
+    "}}"))
+)
+
+(defun mcp-cmd-create-spline (params / pts-str closed layer pairs n fit-array zero-3d doc mspace result spline degree idx pt-str cx cy)
+  "Fit-point spline via vla-AddSpline; tangents are zero and degree is read back."
+  (setq pts-str (mcp-json-get-string params "points_str"))
+  (setq closed (mcp-json-get-string params "closed"))
+  (setq layer (mcp-json-get-string params "layer"))
+  (if (not pts-str)
+    (cons nil "points_str required (format: x1,y1;x2,y2;...)")
+    (progn
+      (setq pairs (mcp-split-string pts-str ";"))
+      (setq n (length pairs))
+      (if (< n 3)
+        (cons nil "spline requires at least three fit points")
+        (progn
+          (if layer (ensure_layer_exists layer "white" "CONTINUOUS"))
+          (setq doc (mcp-active-document))
+          (if (not doc)
+            (cons nil "ActiveX document access unavailable")
+            (progn
+              (setq mspace (vla-get-ModelSpace doc))
+              (setq fit-array (vlax-make-safearray vlax-vbDouble (cons 0 (- (* 3 n) 1))))
+              (setq idx 0)
+              (foreach pt-str pairs
+                (setq cx (atof (car (mcp-split-string pt-str ","))))
+                (setq cy (atof (cadr (mcp-split-string pt-str ","))))
+                (vlax-safearray-put-element fit-array idx (float cx))
+                (vlax-safearray-put-element fit-array (+ idx 1) (float cy))
+                (vlax-safearray-put-element fit-array (+ idx 2) 0.0)
+                (setq idx (+ idx 3))
+              )
+              (setq zero-3d (vlax-make-variant (vlax-make-safearray vlax-vbDouble '(0 . 2))))
+              (setq result (vl-catch-all-apply 'vla-AddSpline
+                (list mspace (vlax-make-variant fit-array) zero-3d zero-3d)))
+              (cond
+                ((vl-catch-all-error-p result)
+                 (cons nil (strcat "AddSpline failed: " (vl-catch-all-error-message result))))
+                (t
+                 (setq spline result)
+                 (if (= closed "1")
+                   (vl-catch-all-apply 'vla-put-Closed (list spline :vlax-true))
+                 )
+                 (if layer (vl-catch-all-apply 'vla-put-Layer (list spline layer)))
+                 (setq degree (vl-catch-all-apply 'vla-get-Degree (list spline)))
+                 (if (vl-catch-all-error-p degree) (setq degree 0))
+                 (cons T (strcat "{\"entity_type\":\"SPLINE\",\"handle\":\"" (vla-get-Handle spline)
+                                 "\",\"degree\":" (itoa degree) "}"))
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+(defun mcp-cmd-entity-explode (params / entity-id ent obj result pieces handles deleted)
+  "Explode via vla-Explode and delete the original, matching ezdxf semantics."
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
+  (cond
+    ((not ent) (cons nil (strcat "Entity not found: " entity-id)))
+    (t
+     (vl-load-com)
+     (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+     (cond
+       ((vl-catch-all-error-p obj) (cons nil "ActiveX object unavailable for entity"))
+       (t
+        (setq result (vl-catch-all-apply 'vla-Explode (list obj)))
+        (cond
+          ((vl-catch-all-error-p result)
+           (cons nil (strcat "Explode failed: " (vl-catch-all-error-message result))))
+          (t
+           (setq pieces (vl-catch-all-apply 'vlax-safearray->list (list result)))
+           (if (vl-catch-all-error-p pieces) (setq pieces nil))
+           (setq handles "")
+           (foreach piece pieces
+             (if (> (strlen handles) 0) (setq handles (strcat handles ",")))
+             (setq handles (strcat handles "\"" (vla-get-Handle piece) "\""))
+           )
+           ;; ezdxf replaces the original entity after exploding.
+           (setq deleted (vl-catch-all-apply 'vla-Delete (list obj)))
+           (cond
+             ((vl-catch-all-error-p deleted)
+              (cons nil (strcat "Explode created copies but deleting the original failed: "
+                                (vl-catch-all-error-message deleted))))
+             (t
+              (cons T (strcat "{\"exploded\":\"" (mcp-escape-string entity-id)
+                              "\",\"created\":" (itoa (length pieces))
+                              ",\"handles\":[" handles "]}"))
+             )
+           )
+          )
+        )
+       )
+     )
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; Styles (text, dimension, linetype)
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-textstyle-list ( / doc result)
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq result "")
+      (vlax-for style (vla-get-TextStyles doc)
+        (if (> (strlen result) 0) (setq result (strcat result ",")))
+        (setq result (strcat result "{\"name\":\"" (mcp-escape-string (vla-get-Name style))
+          "\",\"font\":\"" (mcp-escape-string (mcp-safe-string (vl-catch-all-apply 'vla-get-FontFile (list style))))
+          "\",\"fixed_height\":" (rtos (mcp-safe-real (vl-catch-all-apply 'vla-get-Height (list style)) 0.0) 2 6)
+          "}"))
+      )
+      (cons T (strcat "{\"text_styles\":[" result "]}"))
+    )
+  )
+)
+
+(defun mcp-cmd-textstyle-create (params / name font fixed-height doc styles existing existed style res)
+  (setq name (mcp-json-get-string params "name"))
+  (setq font (mcp-json-get-string params "font"))
+  (setq fixed-height (mcp-json-get-number params "fixed_height"))
+  (if (not font) (setq font "arial.ttf"))
+  (cond
+    ((not name) (cons nil "Text style name required"))
+    (t
+     (setq doc (mcp-active-document))
+     (if (not doc)
+       (cons nil "ActiveX document access unavailable")
+       (progn
+         (setq styles (vla-get-TextStyles doc))
+         (setq existing (vl-catch-all-apply 'vla-Item (list styles name)))
+         (setq existed (not (vl-catch-all-error-p existing)))
+         (if existed (setq style existing) (setq style (vl-catch-all-apply 'vla-Add (list styles name))))
+         (cond
+           ((or (vl-catch-all-error-p style) (null style))
+            (cons nil (strcat "Unable to create text style: " name)))
+           (t
+            (setq res (vl-catch-all-apply 'vla-put-FontFile (list style font)))
+            (cond
+              ((vl-catch-all-error-p res)
+               (cons nil (strcat "Setting font failed: " (vl-catch-all-error-message res))))
+              (t
+               (if (and fixed-height (>= fixed-height 0.0))
+                 (vl-catch-all-apply 'vla-put-Height (list style fixed-height))
+               )
+               (cons T (strcat "{\"name\":\"" (mcp-escape-string name)
+                 "\",\"font\":\"" (mcp-escape-string font)
+                 "\",\"fixed_height\":" (rtos (if fixed-height fixed-height 0.0) 2 6)
+                 ",\"existed\":" (if existed "true" "false") "}"))
+             )
+            )
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-textstyle-set-current (params / name)
+  (setq name (mcp-json-get-string params "name"))
+  (cond
+    ((not name) (cons nil "Text style name required"))
+    ((not (tblsearch "STYLE" name)) (cons nil (strcat "Text style '" name "' does not exist")))
+    (t
+     (setvar "TEXTSTYLE" name)
+     (cons T (strcat "{\"current_text_style\":\"" (mcp-escape-string name) "\"}"))
+    )
+  )
+)
+
+(defun mcp-dimstyle-numeric-fields ( / )
+  "Numeric DIMSTYLE fields exposed by the backend (lowercase in JSON)."
+  '("Dimtxt" "Dimasz" "Dimexe" "Dimexo" "Dimgap" "Dimtad" "Dimjust"
+    "Dimdec" "Dimlfac" "Dimscale" "Dimclrd" "Dimclre" "Dimclrt"
+    "Dimtih" "Dimtoh" "Dimsd1" "Dimsd2" "Dimlwd" "Dimlwe")
+)
+
+(defun mcp-dimstyle-property-name (field / cap i ch)
+  "dimtxt -> Dimtxt for vlax-put-property."
+  (setq cap "" i 1)
+  (while (<= i (strlen field))
+    (setq ch (substr field i 1))
+    (if (= i 1) (setq ch (strcase ch)))
+    (setq cap (strcat cap ch))
+    (setq i (1+ i))
+  )
+  cap
+)
+
+(defun mcp-cmd-dimstyle-list ( / doc result entry value)
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq result "")
+      (vlax-for style (vla-get-DimStyles doc)
+        (setq entry (strcat "{\"name\":\"" (mcp-escape-string (vla-get-Name style)) "\""))
+        (foreach field (mcp-dimstyle-numeric-fields)
+          (setq value (vl-catch-all-apply 'vlax-get-property (list style field)))
+          (if (not (vl-catch-all-error-p value))
+            (setq entry (strcat entry ",\"" (strcase field T) "\":"
+                                (rtos (mcp-safe-real value 0.0) 2 6)))
+          )
+        )
+        (if (> (strlen result) 0) (setq result (strcat result ",")))
+        (setq result (strcat result entry "}"))
+      )
+      (cons T (strcat "{\"dim_styles\":[" result "],\"current\":\""
+                      (mcp-escape-string (getvar "DIMSTYLE")) "\"}"))
+    )
+  )
+)
+
+(defun mcp-cmd-dimstyle-create (params / name values-str doc styles existing existed style applied rejected pair field value res)
+  (setq name (mcp-json-get-string params "name"))
+  (setq values-str (mcp-json-get-string params "values_str"))
+  (cond
+    ((not name) (cons nil "Dimension style name required"))
+    (t
+     (setq doc (mcp-active-document))
+     (if (not doc)
+       (cons nil "ActiveX document access unavailable")
+       (progn
+         (setq styles (vla-get-DimStyles doc))
+         (setq existing (vl-catch-all-apply 'vla-Item (list styles name)))
+         (setq existed (not (vl-catch-all-error-p existing)))
+         (if existed (setq style existing) (setq style (vl-catch-all-apply 'vla-Add (list styles name))))
+         (cond
+           ((or (vl-catch-all-error-p style) (null style))
+            (cons nil (strcat "Unable to create dimension style: " name)))
+           (t
+            (setq applied "" rejected "")
+            (foreach token (if values-str (mcp-split-string values-str ";") '())
+              (setq pair (mcp-split-string token "="))
+              (setq field (strcase (car pair) T))
+              (setq value (atof (cadr pair)))
+              (setq res (vl-catch-all-apply 'vlax-put-property
+                (list style (mcp-dimstyle-property-name field) value)))
+              (cond
+                ((vl-catch-all-error-p res)
+                 (if (> (strlen rejected) 0) (setq rejected (strcat rejected ",")))
+                 (setq rejected (strcat rejected "\"" (mcp-escape-string field) "\"")))
+                (t
+                 (if (> (strlen applied) 0) (setq applied (strcat applied ",")))
+                 (setq applied (strcat applied "\"" (mcp-escape-string field) "\":" (rtos value 2 6))))
+              )
+            )
+            (cons T (strcat "{\"name\":\"" (mcp-escape-string name)
+              "\",\"applied\":{" applied "}"
+              ",\"existed\":" (if existed "true" "false")
+              (if (> (strlen rejected) 0) (strcat ",\"rejected\":[" rejected "]") "")
+              "}"))
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-dimstyle-set-current (params / name)
+  (setq name (mcp-json-get-string params "name"))
+  (cond
+    ((not name) (cons nil "Dimension style name required"))
+    ((not (tblsearch "DIMSTYLE" name)) (cons nil (strcat "Dimension style '" name "' does not exist")))
+    (t
+     (setvar "DIMSTYLE" name)
+     (cons T (strcat "{\"current_dim_style\":\"" (mcp-escape-string name) "\"}"))
+    )
+  )
+)
+
+(defun mcp-cmd-linetype-list ( / doc result)
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq result "")
+      (vlax-for lt (vla-get-Linetypes doc)
+        (if (> (strlen result) 0) (setq result (strcat result ",")))
+        (setq result (strcat result "{\"name\":\"" (mcp-escape-string (vla-get-Name lt))
+          "\",\"description\":\"" (mcp-escape-string (mcp-safe-string (vl-catch-all-apply 'vla-get-Description (list lt)))) "\"}"))
+      )
+      (cons T (strcat "{\"linetypes\":[" result "]}"))
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; Layouts (paper space)
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-layout-list ( / doc result name)
+  "Paper-space layout names (Model excluded)."
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq result "")
+      (vlax-for layout (vla-get-Layouts doc)
+        (setq name (vla-get-Name layout))
+        (if (/= (strcase name) "MODEL")
+          (progn
+            (if (> (strlen result) 0) (setq result (strcat result ",")))
+            (setq result (strcat result "\"" (mcp-escape-string name) "\""))
+          )
+        )
+      )
+      (cons T (strcat "{\"layouts\":[" result "]}"))
+    )
+  )
+)
+
+(defun mcp-cmd-layout-create (params / name doc result)
+  (setq name (mcp-json-get-string params "name"))
+  (if (not name)
+    (cons nil "Layout name required")
+    (progn
+      (setq doc (mcp-active-document))
+      (if (not doc)
+        (cons nil "ActiveX document access unavailable")
+        (progn
+          (setq result (vl-catch-all-apply 'vla-Add (list (vla-get-Layouts doc) name)))
+          (if (vl-catch-all-error-p result)
+            (cons nil (strcat "Layout creation failed: " (vl-catch-all-error-message result)))
+            (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"created\":true}"))
+          )
+        )
+      )
+    )
+  )
+)
+
+(defun mcp-cmd-layout-set-current (params / name)
+  (setq name (mcp-json-get-string params "name"))
+  (cond
+    ((not name) (cons nil "Layout name required"))
+    ((not (tblsearch "LAYOUT" name)) (cons nil (strcat "Layout '" name "' does not exist")))
+    (t
+     (setvar "CTAB" name)
+     (cons T (strcat "{\"current_layout\":\"" (mcp-escape-string name) "\"}"))
+    )
+  )
+)
+
+(defun mcp-cmd-layout-add-viewport (params / layout-name cx cy w h vcx vcy vh layer doc layout-obj paper vp scale)
+  "AddPViewport + CustomScale + Display; view_center is reported for parity."
+  (setq layout-name (mcp-json-get-string params "layout"))
+  (setq cx (mcp-json-get-number params "center_x"))
+  (setq cy (mcp-json-get-number params "center_y"))
+  (setq w (mcp-json-get-number params "width"))
+  (setq h (mcp-json-get-number params "height"))
+  (setq vcx (mcp-json-get-number params "view_center_x"))
+  (setq vcy (mcp-json-get-number params "view_center_y"))
+  (setq vh (mcp-json-get-number params "view_height"))
+  (setq layer (mcp-json-get-string params "layer"))
+  (cond
+    ((not layout-name) (cons nil "Layout name required"))
+    ((or (null cx) (null cy)) (cons nil "center is required"))
+    ((or (null w) (<= w 0.0) (null h) (<= h 0.0) (null vh) (<= vh 0.0))
+     (cons nil "width, height and view_height must be positive"))
+    (t
+     (setq doc (mcp-active-document))
+     (if (not doc)
+       (cons nil "ActiveX document access unavailable")
+       (progn
+         (setq layout-obj (vl-catch-all-apply 'vla-Item (list (vla-get-Layouts doc) layout-name)))
+         (cond
+           ((vl-catch-all-error-p layout-obj)
+            (cons nil (strcat "Layout '" layout-name "' does not exist")))
+           (t
+            (if layer (ensure_layer_exists layer "white" "CONTINUOUS"))
+            (setq paper (vla-get-Block layout-obj))
+            (setq vp (vl-catch-all-apply 'vla-AddPViewport (list paper (list cx cy 0.0) w h)))
+            (cond
+              ((vl-catch-all-error-p vp)
+               (cons nil (strcat "Viewport creation failed: " (vl-catch-all-error-message vp))))
+              (t
+               (setq scale (/ h vh))
+               (vl-catch-all-apply 'vla-put-CustomScale (list vp scale))
+               (if layer (vl-catch-all-apply 'vla-put-Layer (list vp layer)))
+               (vl-catch-all-apply 'vla-Display (list vp :vlax-true))
+               (cons T (strcat "{\"layout\":\"" (mcp-escape-string layout-name)
+                 "\",\"handle\":\"" (vla-get-Handle vp)
+                 "\",\"center\":[" (rtos cx 2 6) "," (rtos cy 2 6) "]"
+                 ",\"width\":" (rtos w 2 6)
+                 ",\"height\":" (rtos h 2 6)
+                 ",\"view_center\":[" (rtos vcx 2 6) "," (rtos vcy 2 6) "]"
+                 ",\"view_height\":" (rtos vh 2 6)
+                 ",\"scale\":" (rtos scale 2 8) "}"))
+              )
+            )
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; Native tables
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-table-create (params / x y rows cols row-h col-w title cells-str layer doc mspace result table
+                                         total-rows row-offset row-index col-index row-token)
+  "Native ActiveX table; title becomes a real table title row when given."
+  (setq x (mcp-json-get-number params "x"))
+  (setq y (mcp-json-get-number params "y"))
+  (setq rows (fix (mcp-json-get-number params "rows")))
+  (setq cols (fix (mcp-json-get-number params "cols")))
+  (setq row-h (mcp-json-get-number params "row_height"))
+  (setq col-w (mcp-json-get-number params "col_width"))
+  (setq title (mcp-json-get-string params "title"))
+  (setq cells-str (mcp-json-get-string params "cells_str"))
+  (setq layer (mcp-json-get-string params "layer"))
+  (cond
+    ((or (null x) (null y)) (cons nil "x and y are required"))
+    ((or (null rows) (< rows 1) (null cols) (< cols 1))
+     (cons nil "rows and cols must be positive integers"))
+    ((or (null row-h) (<= row-h 0.0) (null col-w) (<= col-w 0.0))
+     (cons nil "row_height and col_width must be positive"))
+    (t
+     (setq doc (mcp-active-document))
+     (if (not doc)
+       (cons nil "ActiveX document access unavailable")
+       (progn
+         (setq mspace (vla-get-ModelSpace doc))
+         ;; AddTable rows include the title row when not suppressed.
+         (setq total-rows (if title (+ rows 1) rows))
+         (setq table (vl-catch-all-apply 'vla-AddTable
+           (list mspace (list x y 0.0) total-rows cols row-h col-w)))
+         (cond
+           ((vl-catch-all-error-p table)
+            (cons nil (strcat "AddTable failed: " (vl-catch-all-error-message table))))
+           (t
+            (vl-catch-all-apply 'vla-put-HeaderSuppressed (list table :vlax-true))
+            (vl-catch-all-apply 'vla-put-TitleSuppressed
+              (list table (if title :vlax-false :vlax-true)))
+            (if title (vl-catch-all-apply 'vla-SetText (list table 0 0 title)))
+            (setq row-offset (if title 1 0))
+            (if cells-str
+              (progn
+                (setq row-index 0)
+                (foreach row-token (mcp-split-string cells-str ";")
+                  (setq col-index 0)
+                  (foreach cell-token (mcp-split-string row-token "|")
+                    (vl-catch-all-apply 'vla-SetText
+                      (list table (+ row-offset row-index) col-index cell-token))
+                    (setq col-index (1+ col-index))
+                  )
+                  (setq row-index (1+ row-index))
+                )
+              )
+            )
+            (if layer (vl-catch-all-apply 'vla-put-Layer (list table layer)))
+            (cons T (strcat "{\"representation\":\"native_table\",\"anchor\":\"" (vla-get-Handle table)
+              "\",\"handle\":\"" (vla-get-Handle table)
+              "\",\"rows\":" (itoa rows)
+              ",\"cols\":" (itoa cols)
+              ",\"layer\":\"" (mcp-escape-string (if layer layer "0")) "\"}"))
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-table-set-cell (params / entity-id row col text table res)
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (setq row (mcp-json-get-number params "row"))
+  (setq col (mcp-json-get-number params "col"))
+  (setq text (mcp-json-get-string params "text"))
+  (cond
+    ((or (null row) (null col)) (cons nil "row and col are required"))
+    ((not (setq table (mcp-table-object entity-id)))
+     (cons nil (strcat "Entity not found: " entity-id)))
+    (t
+     (setq res (vl-catch-all-apply 'vla-SetText
+       (list table (fix row) (fix col) (if text text ""))))
+     (if (vl-catch-all-error-p res)
+       (cons nil (strcat "SetCell failed: " (vl-catch-all-error-message res)))
+       (cons T (strcat "{\"anchor\":\"" (mcp-escape-string entity-id)
+         "\",\"row\":" (itoa (fix row))
+         ",\"col\":" (itoa (fix col))
+         ",\"text\":\"" (mcp-escape-string (if text text "")) "\"}"))
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-table-set-col-widths (params / entity-id widths-str table token json idx failed res)
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (setq widths-str (mcp-json-get-string params "widths_str"))
+  (if (not widths-str)
+    (cons nil "widths_str required")
+    (if (not (setq table (mcp-table-object entity-id)))
+      (cons nil (strcat "Entity not found: " entity-id))
+      (progn
+        (setq json "" idx 0 failed nil)
+        (foreach token (mcp-split-string widths-str ";")
+          (setq res (vl-catch-all-apply 'vla-SetColumnWidth (list table idx (atof token))))
+          (if (vl-catch-all-error-p res)
+            (setq failed T)
+            (progn
+              (if (> idx 0) (setq json (strcat json ",")))
+              (setq json (strcat json (rtos (atof token) 2 6)))
+            )
+          )
+          (setq idx (1+ idx))
+        )
+        (if failed
+          (cons nil "SetColumnWidth failed (index out of range or entity is not a table)")
+          (cons T (strcat "{\"anchor\":\"" (mcp-escape-string entity-id)
+            "\",\"representation\":\"native_table\",\"col_widths\":[" json "]}"))
+        )
+      )
+    )
+  )
+)
+
+(defun mcp-cmd-table-set-row-heights (params / entity-id heights-str table token json idx failed res)
+  (setq entity-id (mcp-json-get-string params "entity_id"))
+  (setq heights-str (mcp-json-get-string params "heights_str"))
+  (if (not heights-str)
+    (cons nil "heights_str required")
+    (if (not (setq table (mcp-table-object entity-id)))
+      (cons nil (strcat "Entity not found: " entity-id))
+      (progn
+        (setq json "" idx 0 failed nil)
+        (foreach token (mcp-split-string heights-str ";")
+          (setq res (vl-catch-all-apply 'vla-SetRowHeight (list table idx (atof token))))
+          (if (vl-catch-all-error-p res)
+            (setq failed T)
+            (progn
+              (if (> idx 0) (setq json (strcat json ",")))
+              (setq json (strcat json (rtos (atof token) 2 6)))
+            )
+          )
+          (setq idx (1+ idx))
+        )
+        (if failed
+          (cons nil "SetRowHeight failed (index out of range or entity is not a table)")
+          (cons T (strcat "{\"anchor\":\"" (mcp-escape-string entity-id)
+            "\",\"representation\":\"native_table\",\"row_heights\":[" json "]}"))
+        )
+      )
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
+;; External references (command-based; AutoCAD -XREF prompts)
+;; -----------------------------------------------------------------------
+
+(defun mcp-cmd-xref-list ( / doc result name path is-xref)
+  (setq doc (mcp-active-document))
+  (if (not doc)
+    (cons nil "ActiveX document access unavailable")
+    (progn
+      (setq result "")
+      (vlax-for blk (vla-get-Blocks doc)
+        (setq is-xref (vl-catch-all-apply 'vla-get-IsXRef (list blk)))
+        (if (and (not (vl-catch-all-error-p is-xref)) (= is-xref :vlax-true))
+          (progn
+            (setq name (vla-get-Name blk))
+            (setq path (mcp-safe-string (vl-catch-all-apply 'vla-get-Path (list blk))))
+            (if (> (strlen result) 0) (setq result (strcat result ",")))
+            (setq result (strcat result "{\"name\":\"" (mcp-escape-string name)
+              "\",\"path\":\"" (mcp-escape-string path) "\"}"))
+          )
+        )
+      )
+      (cons T (strcat "{\"xrefs\":[" result "]}"))
+    )
+  )
+)
+
+(defun mcp-cmd-xref-attach (params / path x y name attach-name old-filedia result block handle)
+  (setq path (mcp-json-get-string params "path"))
+  (setq x (mcp-json-get-number params "x"))
+  (setq y (mcp-json-get-number params "y"))
+  (setq name (mcp-json-get-string params "name"))
+  (if (not x) (setq x 0.0))
+  (if (not y) (setq y 0.0))
+  (cond
+    ((not path) (cons nil "Xref path required"))
+    ((not (findfile path)) (cons nil (strcat "External reference file not found: " path)))
+    (t
+     ;; "blockname=path" attaches the drawing under a different name.
+     (setq attach-name (if (and name (> (strlen name) 0)) (strcat name "=" path) path))
+     (setq old-filedia (getvar "FILEDIA"))
+     (setvar "FILEDIA" 0)
+     (setq result (vl-catch-all-apply 'vl-cmdf
+       (list "_.-XREF" "_ATTACH" attach-name (list x y 0.0) 1.0 1.0 0.0)))
+     (setvar "FILEDIA" old-filedia)
+     (setq block (if (and name (> (strlen name) 0)) name (vl-filename-base path)))
+     (cond
+       ((vl-catch-all-error-p result)
+        (cons nil (strcat "XREF attach failed: " (vl-catch-all-error-message result))))
+       ((not (tblsearch "BLOCK" block))
+        (cons nil (strcat "XREF attach did not create block: " block)))
+       (t
+        (setq handle (if (entlast) (cdr (assoc 5 (entget (entlast)))) ""))
+        (cons T (strcat "{\"name\":\"" (mcp-escape-string block)
+          "\",\"path\":\"" (mcp-escape-string path)
+          "\",\"insert\":[" (rtos x 2 6) "," (rtos y 2 6) "]"
+          (if (> (strlen handle) 0) (strcat ",\"handle\":\"" handle "\"") "")
+          ",\"via\":\"command\"}"))
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-xref-detach (params / name old-filedia result)
+  (setq name (mcp-json-get-string params "name"))
+  (cond
+    ((not name) (cons nil "Xref name required"))
+    ((not (tblsearch "BLOCK" name)) (cons nil (strcat "Xref '" name "' is not attached")))
+    (t
+     (setq old-filedia (getvar "FILEDIA"))
+     (setvar "FILEDIA" 0)
+     (setq result (vl-catch-all-apply 'vl-cmdf (list "_.-XREF" "_DETACH" name)))
+     (setvar "FILEDIA" old-filedia)
+     (cond
+       ((vl-catch-all-error-p result)
+        (cons nil (strcat "XREF detach failed: " (vl-catch-all-error-message result))))
+       ((tblsearch "BLOCK" name)
+        (cons nil (strcat "XREF detach did not remove block: " name)))
+       (t
+        (cons T (strcat "{\"name\":\"" (mcp-escape-string name)
+          "\",\"detached\":true,\"via\":\"command\"}"))
+       )
+     )
+    )
+  )
+)
+
+(defun mcp-cmd-xref-reload (params / name old-filedia result)
+  (setq name (mcp-json-get-string params "name"))
+  (cond
+    ((not name) (cons nil "Xref name required"))
+    ((not (tblsearch "BLOCK" name)) (cons nil (strcat "Xref '" name "' is not attached")))
+    (t
+     (setq old-filedia (getvar "FILEDIA"))
+     (setvar "FILEDIA" 0)
+     (setq result (vl-catch-all-apply 'vl-cmdf (list "_.-XREF" "_RELOAD" name)))
+     (setvar "FILEDIA" old-filedia)
+     (if (vl-catch-all-error-p result)
+       (cons nil (strcat "XREF reload failed: " (vl-catch-all-error-message result)))
+       (cons T (strcat "{\"name\":\"" (mcp-escape-string name)
+         "\",\"reloaded\":true,\"via\":\"command\"}"))
+     )
+    )
   )
 )
 
