@@ -224,8 +224,16 @@ Claude Desktop, Cursor, or any compatible client. This workstation uses the
     text cells) with a table manifest; structural edits (column widths, row
     heights) rebuild the grid and return a new anchor handle.
 86. New offline test suite `tests/test_modernization.py` (45 tests) covers
-    all of the above without AutoCAD; full suite: 338 tests green.
+    all of the above without AutoCAD.
 87. Added `skills/railway-design/` — an agent skill for Russian railway
     design (track plan, longitudinal profile, cant diagrams, turnouts,
     ПИКЕТАЖ) driven by this MCP's tools plus deterministic calculation
     scripts.
+88. The File IPC compatibility backend implements the modernization set for
+    live AutoCAD/LT: 26 new whitelisted LISP commands (measure-*, bbox,
+    summary, entity-select, create-spline, entity-explode, textstyle-*,
+    dimstyle-*, linetype-list, layout-*, table-*, xref-*) with
+    vl-catch-all-apply guards; pure-geometry inquiries (distance/angle,
+    point-list area) run Python-side without IPC. 64 new IPC tests in
+    `tests/test_modernization_ipc.py`; full suite: 402 tests green.
+89. Fixed a latent `typing.Any` import gap in `file_ipc.py` annotations.

@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "purpose": "Машиночитаемая схема слоёв железнодорожного чертежа (план трассы, продольный профиль, стрелочные переводы). Агент применяет её через инструменты layer.create / layer.set_properties MCP-сервера autocad-mcp.",
+  "model_convention": {
+    "plan_model_units": "metres",
+    "profile_grid_units": "sheet millimetres (grid files are 1:1 in mm; see references/layers-and-standards.md)",
+    "notes": [
+      "Не смешивать метры (модель плана трассы) и миллиметры (сетка профиля) в одном документе/пространстве.",
+      "Слои с \"plot\": false не выводить на печать и не включать в выпуск.",
+      "Цвета — ACI (AutoCAD Color Index). Типы линий CENTER/DASHED/HIDDEN должны быть загружены в документ; в offline-бэкенде ezdxf используйте шаблон с setup=true, иначе layer.create вернёт ошибку — тогда создайте слой с CONTINUOUS и зафиксируйте ограничение."
+    ]
+  },
+  "layers": [
+    {
+      "name": "RW-AXIS-DES",
+      "role": "axis_design",
+      "description": "Ось проектируемой трассы (прямые, круговые, переходные кривые)",
+      "color": 1,
+      "linetype": "CENTER",
+      "lineweight_mm": 0.25,
+      "plot": true
+    },
+    {
+      "name": "RW-AXIS-EX",
+      "role": "axis_existing",
+      "description": "Ось существующего пути",
+      "color": 8,
+      "linetype": "CENTER",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-TRACK-DES",
+      "role": "track_design",
+      "description": "Проектируемый путь: рельсовые нити, края земляного полотна",
+      "color": 7,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.5,
+      "plot": true
+    },
+    {
+      "name": "RW-TRACK-EX",
+      "role": "track_existing",
+      "description": "Существующий путь (условное изображение)",
+      "color": 8,
+      "linetype": "DASHED",
+      "lineweight_mm": 0.25,
+      "plot": true
+    },
+    {
+      "name": "RW-TURNOUT",
+      "role": "turnout",
+      "description": "Стрелочные переводы: условные обозначения, марки, съезды",
+      "color": 30,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.25,
+      "plot": true
+    },
+    {
+      "name": "RW-CHAINAGE",
+      "role": "chainage",
+      "description": "Пикетаж: ПК+, плюсовые точки, ВУ/НК/КК/НКК/ККК/СЦ выноски",
+      "color": 3,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-GRADE",
+      "role": "grade",
+      "description": "Уклонозасечка: графы уклонов, стрелки уклонов, вертикальные кривые",
+      "color": 4,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.25,
+      "plot": true
+    },
+    {
+      "name": "RW-PROF-DESIGN",
+      "role": "profile_design",
+      "description": "Проектный (красный) профиль: проектные отметки и линия",
+      "color": 1,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.5,
+      "plot": true
+    },
+    {
+      "name": "RW-PROF-GROUND",
+      "role": "profile_ground",
+      "description": "Земляной (чёрный) профиль по отметкам земли/уклонозасечке",
+      "color": 2,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.3,
+      "plot": true
+    },
+    {
+      "name": "RW-PROF-EXIST",
+      "role": "profile_existing",
+      "description": "Существующие поверхности, коммуникации, пересекаемые сооружения",
+      "color": 8,
+      "linetype": "HIDDEN",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-BOREHOLE",
+      "role": "borehole",
+      "description": "Скважины, шурфы, геологические колонки",
+      "color": 5,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-GRID",
+      "role": "profile_grid",
+      "description": "Сетка продольного профиля (линии граф по СПДС)",
+      "color": 9,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.05,
+      "plot": true
+    },
+    {
+      "name": "RW-TEXT",
+      "role": "text",
+      "description": "Тексты: отметки, пикетажные подписи, марки переводов",
+      "color": 7,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-DIM",
+      "role": "dimension",
+      "description": "Размеры и выносные линии",
+      "color": 6,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.13,
+      "plot": true
+    },
+    {
+      "name": "RW-FRAME",
+      "role": "frame",
+      "description": "Рамка листа, штамп, таблицы",
+      "color": 7,
+      "linetype": "CONTINUOUS",
+      "lineweight_mm": 0.5,
+      "plot": true
+    },
+    {
+      "name": "RW-CONSTR",
+      "role": "construction",
+      "description": "Вспомогательные построения (тангенсы, биссектрисы, выносные оси ВУ) — на печать не выводить",
+      "color": 9,
+      "linetype": "DASHED",
+      "lineweight_mm": 0.05,
+      "plot": false
+    }
+  ],
+  "mcp_usage": {
+    "apply": "layer(operation=\"create\", data={\"name\": ..., \"color\": ..., \"linetype\": ..., \"lineweight\": ...}) для каждого слоя; затем layer(operation=\"set_current\", data={\"name\": ...}) перед черчением.",
+    "verify": "layer(operation=\"list\") и сравнить имена/цвета/типы линий с этой схемой; расхождение — E_POSTCONDITION_MISMATCH по контракту скилла.",
+    "note": "lineweight в MCP передаётся в мм; при офлайн-бэкенде проверяйте фактическое применение через layer.list."
+  }
+}
