@@ -1,7 +1,7 @@
-"""AutoCAD MCP Server v4.0 — consolidated tools with operation dispatch.
+"""AutoCAD MCP Server v4.1 — consolidated tools with operation dispatch.
 
-Tools: drawing, entity, solid, product, layer, block, annotation, pid,
-transaction, view, job, and system.
+Tools: drawing, entity, solid, product, layer, block, annotation, inquiry,
+style, layout, table, xref, pid, transaction, view, job, and system.
 """
 
 from __future__ import annotations
@@ -538,11 +538,13 @@ async def drawing(
     Operations:
       activate   - Activate a known document without changing window focus.
                    data: {doc_id, expected_revision, lease_token?, worker_generation?}
-      create     — Create a new empty drawing. data: {name?}
+      create     — Create a new empty drawing. data: {name?, version?}
+                   version: R12, R2000, R2004, R2007, R2010, R2013 (default), R2018
       open       — Open an existing drawing. data: {path}
       info       — Get drawing extents, entity count, layers, blocks.
       save       — Save current drawing. data: {path?} (saves to path if given, else QSAVE)
-      save_as_dxf — Export as DXF. data: {path}
+      save_as_dxf — Export as DXF. data: {path, version?} — convert to another
+                    DXF version on export (ezdxf backend).
       plot_pdf   — Plot to PDF. data: {path}
       render_preview — Native deterministic preview. data: {path, paper?, orientation?, plot_style?}
                        Optional visual_style: Conceptual, Realistic, Shaded, or
@@ -691,11 +693,11 @@ async def drawing(
                 default_stem=str(requested_name),
             )
             result = await backend.drawing_create(
-                str(target.path), idempotency_key=idempotency_key
+                str(target.path), idempotency_key=idempotency_key, version=data.get("version")
             )
         else:
             result = await backend.drawing_create(
-                None, idempotency_key=idempotency_key
+                None, idempotency_key=idempotency_key, version=data.get("version")
             )
     elif operation == "info":
         result = await backend.drawing_info()
@@ -727,7 +729,7 @@ async def drawing(
             extension=".dxf",
             default_stem=data.get("name", "drawing"),
         )
-        result = await backend.drawing_save_as_dxf(str(target.path))
+        result = await backend.drawing_save_as_dxf(str(target.path), data.get("version"))
     elif operation == "plot_pdf":
         scale_contract = scale_contract_prevalidated or normalize_plot_scale(data)
         if not scale_contract["ok"]:
@@ -854,6 +856,7 @@ async def entity(
       create_rectangle  — x1, y1, x2, y2, layer?
       create_arc        — data: {cx, cy, radius, start_angle, end_angle}, layer?
       create_ellipse    — data: {cx, cy, major_x, major_y, ratio}, layer?
+      create_spline     — points: [[x,y],...], data: {degree?}, layer?
       create_mtext      — data: {x, y, width, text, height?}, layer?
       create_hatch      — entity_id, data: {pattern?, angle?, scale?, layer?}
       create_batch      — data: {entities: [{type, ...}], continue_on_error?}
@@ -862,6 +865,7 @@ async def entity(
       list              — layer? → list entities
       count             — layer? → count entities
       get               — entity_id → entity details
+      select            — data: {type?, layer?, window?: [x1,y1,x2,y2], limit?} → filtered handles
 
     Modify operations:
       copy    — entity_id, data: {dx, dy}
@@ -873,20 +877,23 @@ async def entity(
       array   — entity_id, data: {rows, cols, row_dist, col_dist}
       fillet  — data: {id1, id2, radius}
       chamfer — data: {id1, id2, dist1, dist2}
+      stretch — entity_id, data: {window: [x1,y1,x2,y2], dx, dy}
+      explode — entity_id (block reference or polyline)
       erase   — entity_id
     """
     data = data or {}
     backend = await get_backend()
     known_operations = {
         "create_line", "create_circle", "create_polyline", "create_rectangle",
-        "create_arc", "create_tangent_arc", "create_ellipse", "create_mtext",
-        "create_text", "create_hatch", "create_batch", "list", "count", "get",
-        "copy", "move", "rotate", "scale", "mirror", "offset", "array", "fillet",
-        "chamfer", "trim", "extend", "break", "join", "constrain", "erase",
+        "create_arc", "create_tangent_arc", "create_ellipse", "create_spline",
+        "create_mtext", "create_text", "create_hatch", "create_batch", "list",
+        "count", "get", "select", "copy", "move", "rotate", "scale", "mirror",
+        "offset", "array", "fillet", "chamfer", "trim", "extend", "break",
+        "join", "constrain", "stretch", "explode", "erase",
     }
     if operation not in known_operations:
         return tool_error(f"Unknown entity operation: {operation}", code="E_UNSUPPORTED_OPERATION")
-    mutating = operation not in {"list", "count", "get"}
+    mutating = operation not in {"list", "count", "get", "select"}
     if mutating:
         guard = await _guard_mutation(
             backend, doc_id, expected_revision, lease_token, worker_generation
@@ -900,7 +907,8 @@ async def entity(
     create_kind = operation.removeprefix("create_")
     if operation in {
         "create_line", "create_circle", "create_polyline", "create_rectangle",
-        "create_arc", "create_tangent_arc", "create_ellipse", "create_mtext", "create_text",
+        "create_arc", "create_tangent_arc", "create_ellipse", "create_spline",
+        "create_mtext", "create_text",
     }:
         layer_check = await _require_existing_layer(backend, layer)
         if not layer_check.ok:
@@ -909,6 +917,8 @@ async def entity(
         if operation in {"create_line", "create_rectangle"}:
             params.update(x1=x1, y1=y1, x2=x2, y2=y2)
         elif operation == "create_polyline":
+            params["points"] = points
+        elif operation == "create_spline":
             params["points"] = points
         elif operation == "create_tangent_arc":
             try:
@@ -995,6 +1005,8 @@ async def entity(
             result.payload["tangent_geometry"] = geometry
     elif operation == "create_ellipse":
         result = await backend.create_ellipse(data["cx"], data["cy"], data["major_x"], data["major_y"], data["ratio"], layer)
+    elif operation == "create_spline":
+        result = await backend.create_spline(points or [], layer, data.get("degree", 3))
     elif operation == "create_mtext":
         result = await backend.create_mtext(data["x"], data["y"], data["width"], data["text"], data.get("height", 2.5), layer)
     elif operation == "create_text":
@@ -1054,6 +1066,8 @@ async def entity(
         result = await backend.entity_count(layer)
     elif operation == "get":
         result = await backend.entity_get_with_semantics(entity_id)
+    elif operation == "select":
+        result = await backend.entity_select(data)
     # --- Modify ---
     elif operation == "copy":
         result = await backend.entity_copy(entity_id, data["dx"], data["dy"])
@@ -1083,6 +1097,22 @@ async def entity(
         result = await backend.entity_join(data.get("entity_ids", []), data.get("tolerance", 0.0))
     elif operation == "constrain":
         result = await backend.entity_constrain(data["constraint"], data.get("entity_ids", []))
+    elif operation == "stretch":
+        if not entity_id:
+            return tool_error(
+                "stretch requires entity_id",
+                code="E_PARAMETER_REJECTED",
+                recommended_action="select_an_entity_and_retry",
+            )
+        result = await backend.entity_stretch(entity_id, data["window"], data["dx"], data["dy"])
+    elif operation == "explode":
+        if not entity_id:
+            return tool_error(
+                "explode requires entity_id",
+                code="E_PARAMETER_REJECTED",
+                recommended_action="select_a_block_reference_or_polyline",
+            )
+        result = await backend.entity_explode(entity_id)
     elif operation == "erase":
         result = await backend.entity_erase(entity_id)
         if result.ok and doc_id and entity_id:
@@ -2031,6 +2061,383 @@ async def view(
         )
     else:
         return tool_error(f"Unknown view operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+
+
+# ==========================================================================
+# 8a. inquiry — Read-only measurements and drawing statistics
+# ==========================================================================
+
+
+@mcp.tool(annotations={"title": "AutoCAD Inquiry (measurements)", "readOnlyHint": True})
+@_safe("inquiry")
+async def inquiry(operation: str, data: dict | None = None) -> ToolResult:
+    """Read-only measurements: distances, areas, angles, lengths, extents.
+
+    Operations:
+      distance — data: {p1: [x,y], p2: [x,y]} → distance, dx, dy, angle
+      area     — data: {entity_id} (closed entity) or {points: [[x,y],...]}
+      angle    — data: {vertex: [x,y], p1: [x,y], p2: [x,y]} → angle in degrees
+      length   — data: {entity_id} → curve length (line, polyline, arc, circle, spline)
+      bbox     — data: {entity_id?, layer?} → bounds of one entity or a layer/all
+      summary  — {} → entity counts by type and layer + drawing extents
+    """
+    data = data or {}
+    backend = await get_backend()
+    if operation == "distance":
+        result = await backend.inquiry_distance(data["p1"], data["p2"])
+    elif operation == "area":
+        result = await backend.inquiry_area(data.get("entity_id"), data.get("points"))
+    elif operation == "angle":
+        result = await backend.inquiry_angle(data["vertex"], data["p1"], data["p2"])
+    elif operation == "length":
+        if not data.get("entity_id"):
+            return tool_error("length requires data.entity_id", code="E_PARAMETER_REJECTED")
+        result = await backend.inquiry_length(data["entity_id"])
+    elif operation == "bbox":
+        result = await backend.inquiry_bbox(data.get("entity_id"), data.get("layer"))
+    elif operation == "summary":
+        result = await backend.inquiry_summary()
+    else:
+        return tool_error(f"Unknown inquiry operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+    return _json(result.to_dict())
+
+
+# ==========================================================================
+# 8b. style — Text styles, dimension styles, linetypes
+# ==========================================================================
+
+
+@mcp.tool(annotations={"title": "AutoCAD Style Operations", "readOnlyHint": False})
+@_safe("style")
+async def style(
+    operation: str,
+    doc_id: str | None = None,
+    expected_revision: int | None = None,
+    lease_token: str | None = None,
+    worker_generation: int | None = None,
+    idempotency_key: str | None = None,
+    data: dict | None = None,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Manage named styles: text styles, dimension styles, linetypes.
+
+    Operations:
+      textstyle_list        — list text styles with fonts
+      textstyle_create      — data: {name, font?, fixed_height?}
+      textstyle_set_current — data: {name}
+      dimstyle_list         — list dimension styles
+      dimstyle_create       — data: {name, values?: {dimtxt, dimasz, dimtad, ...}}
+      dimstyle_set_current  — data: {name} — used by new dimensions
+      linetype_list         — list linetypes
+      linetype_create       — data: {name, pattern?: [lengths], description?}
+    """
+    data = data or {}
+    backend = await get_backend()
+    known_operations = {
+        "textstyle_list", "textstyle_create", "textstyle_set_current",
+        "dimstyle_list", "dimstyle_create", "dimstyle_set_current",
+        "linetype_list", "linetype_create",
+    }
+    if operation not in known_operations:
+        return tool_error(f"Unknown style operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+    mutating = operation not in {
+        "textstyle_list", "dimstyle_list", "linetype_list",
+    }
+    if mutating:
+        guard = await _guard_mutation(
+            backend, doc_id, expected_revision, lease_token, worker_generation
+        )
+        if not guard.ok:
+            return await add_screenshot_if_available(guard, False)
+        replay = _begin_journaled_mutation(
+            idempotency_key,
+            operation=f"style.{operation}",
+            request={"operation": operation, "doc_id": doc_id, "data": data},
+            context=guard.payload,
+        )
+        if replay is not None:
+            return await add_screenshot_if_available(replay, False)
+
+    if operation == "textstyle_list":
+        result = await backend.textstyle_list()
+    elif operation == "textstyle_create":
+        if not str(data.get("name", "")).strip():
+            return tool_error("textstyle_create requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.textstyle_create(
+            data["name"], data.get("font", "arial.ttf"), data.get("fixed_height")
+        )
+    elif operation == "textstyle_set_current":
+        result = await backend.textstyle_set_current(data["name"])
+    elif operation == "dimstyle_list":
+        result = await backend.dimstyle_list()
+    elif operation == "dimstyle_create":
+        if not str(data.get("name", "")).strip():
+            return tool_error("dimstyle_create requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.dimstyle_create(data["name"], data.get("values"))
+    elif operation == "dimstyle_set_current":
+        result = await backend.dimstyle_set_current(data["name"])
+    elif operation == "linetype_list":
+        result = await backend.linetype_list()
+    elif operation == "linetype_create":
+        if not str(data.get("name", "")).strip():
+            return tool_error("linetype_create requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.linetype_create(
+            data["name"], data.get("pattern"), data.get("description", "")
+        )
+    if mutating:
+        result = await _attach_document_context(backend, result, doc_id=doc_id, mutated=True)
+        result = _finish_journaled_mutation(idempotency_key, result)
+    return await add_screenshot_if_available(result, include_screenshot)
+
+
+# ==========================================================================
+# 8c. layout — Paper space layouts and viewports
+# ==========================================================================
+
+
+@mcp.tool(annotations={"title": "AutoCAD Layout Operations", "readOnlyHint": False})
+@_safe("layout")
+async def layout(
+    operation: str,
+    doc_id: str | None = None,
+    expected_revision: int | None = None,
+    lease_token: str | None = None,
+    worker_generation: int | None = None,
+    idempotency_key: str | None = None,
+    data: dict | None = None,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Paper space layout management: layouts and viewports.
+
+    Operations:
+      list          — list layouts in tab order
+      create        — data: {name}
+      set_current   — data: {name}
+      add_viewport  — data: {layout, center: [x,y], width, height,
+                       view_center: [x,y], view_height, layer?}
+                      Places a viewport window on a paper space layout showing
+                      the model at scale = height / view_height.
+    """
+    data = data or {}
+    backend = await get_backend()
+    known_operations = {"list", "create", "set_current", "add_viewport"}
+    if operation not in known_operations:
+        return tool_error(f"Unknown layout operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+    mutating = operation != "list"
+    if mutating:
+        guard = await _guard_mutation(
+            backend, doc_id, expected_revision, lease_token, worker_generation
+        )
+        if not guard.ok:
+            return await add_screenshot_if_available(guard, False)
+        replay = _begin_journaled_mutation(
+            idempotency_key,
+            operation=f"layout.{operation}",
+            request={"operation": operation, "doc_id": doc_id, "data": data},
+            context=guard.payload,
+        )
+        if replay is not None:
+            return await add_screenshot_if_available(replay, False)
+
+    if operation == "list":
+        result = await backend.layout_list()
+    elif operation == "create":
+        if not str(data.get("name", "")).strip():
+            return tool_error("layout.create requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.layout_create(data["name"])
+    elif operation == "set_current":
+        result = await backend.layout_set_current(data["name"])
+    elif operation == "add_viewport":
+        for field in ("layout", "center", "width", "height", "view_center", "view_height"):
+            if data.get(field) is None:
+                return tool_error(
+                    f"add_viewport requires data.{field}",
+                    code="E_PARAMETER_REJECTED",
+                )
+        result = await backend.layout_add_viewport(
+            data["layout"],
+            data["center"],
+            float(data["width"]),
+            float(data["height"]),
+            data["view_center"],
+            float(data["view_height"]),
+            data.get("layer"),
+        )
+    if mutating:
+        result = await _attach_document_context(backend, result, doc_id=doc_id, mutated=True)
+        result = _finish_journaled_mutation(idempotency_key, result)
+    return await add_screenshot_if_available(result, include_screenshot)
+
+
+# ==========================================================================
+# 8d. table — Tables (schedules, title blocks, data grids)
+# ==========================================================================
+
+
+@mcp.tool(annotations={"title": "AutoCAD Table Operations", "readOnlyHint": False})
+@_safe("table")
+async def table(
+    operation: str,
+    doc_id: str | None = None,
+    expected_revision: int | None = None,
+    lease_token: str | None = None,
+    worker_generation: int | None = None,
+    idempotency_key: str | None = None,
+    data: dict | None = None,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Create and edit drawing tables (ведомости, спецификации, пикетажные сетки).
+
+    The ezdxf backend draws tables as a composite grid (lines + text cells) —
+    representation is reported in the payload. Live AutoCAD backends may use
+    native TABLE entities.
+
+    Operations:
+      create          — data: {x, y, rows, cols, row_height?, col_width?,
+                         title?, cells?: [[text,...],...], layer?}
+                         Returns an anchor handle used by the other operations.
+      set_cell        — data: {entity_id (anchor), row, col, text}
+      set_col_widths  — data: {entity_id, widths: [w,...]} (one per column)
+      set_row_heights — data: {entity_id, heights: [h,...]} (one per row)
+    """
+    data = data or {}
+    backend = await get_backend()
+    known_operations = {"create", "set_cell", "set_col_widths", "set_row_heights"}
+    if operation not in known_operations:
+        return tool_error(f"Unknown table operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+    guard = await _guard_mutation(
+        backend, doc_id, expected_revision, lease_token, worker_generation
+    )
+    if not guard.ok:
+        return await add_screenshot_if_available(guard, False)
+    replay = _begin_journaled_mutation(
+        idempotency_key,
+        operation=f"table.{operation}",
+        request={"operation": operation, "doc_id": doc_id, "data": data},
+        context=guard.payload,
+    )
+    if replay is not None:
+        return await add_screenshot_if_available(replay, False)
+
+    if operation == "create":
+        for field in ("x", "y", "rows", "cols"):
+            if data.get(field) is None:
+                return tool_error(f"table.create requires data.{field}", code="E_PARAMETER_REJECTED")
+        layer_check = await _require_existing_layer(backend, data.get("layer"))
+        if not layer_check.ok:
+            return await add_screenshot_if_available(layer_check, False)
+        result = await backend.table_create(
+            float(data["x"]),
+            float(data["y"]),
+            int(data["rows"]),
+            int(data["cols"]),
+            float(data.get("row_height", 1.0)),
+            float(data.get("col_width", 10.0)),
+            data.get("title"),
+            data.get("cells"),
+            data.get("layer"),
+        )
+    elif operation == "set_cell":
+        for field in ("entity_id", "row", "col", "text"):
+            if data.get(field) is None:
+                return tool_error(f"table.set_cell requires data.{field}", code="E_PARAMETER_REJECTED")
+        result = await backend.table_set_cell(
+            data["entity_id"], int(data["row"]), int(data["col"]), str(data["text"])
+        )
+    elif operation == "set_col_widths":
+        if not isinstance(data.get("widths"), list) or not data.get("entity_id"):
+            return tool_error(
+                "table.set_col_widths requires data.entity_id and data.widths",
+                code="E_PARAMETER_REJECTED",
+            )
+        result = await backend.table_set_col_widths(data["entity_id"], data["widths"])
+    elif operation == "set_row_heights":
+        if not isinstance(data.get("heights"), list) or not data.get("entity_id"):
+            return tool_error(
+                "table.set_row_heights requires data.entity_id and data.heights",
+                code="E_PARAMETER_REJECTED",
+            )
+        result = await backend.table_set_row_heights(data["entity_id"], data["heights"])
+    result = await _attach_document_context(backend, result, doc_id=doc_id, mutated=True)
+    result = _finish_journaled_mutation(idempotency_key, result)
+    return await add_screenshot_if_available(result, include_screenshot)
+
+
+# ==========================================================================
+# 8e. xref — External reference management
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations={
+        "title": "AutoCAD XRef Operations",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+    }
+)
+@_safe("xref")
+async def xref(
+    operation: str,
+    doc_id: str | None = None,
+    expected_revision: int | None = None,
+    lease_token: str | None = None,
+    worker_generation: int | None = None,
+    idempotency_key: str | None = None,
+    data: dict | None = None,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Attach, list, reload, and detach external references (XRefs).
+
+    Operations:
+      list   — list attached external references with paths
+      attach — data: {path, x?, y?, name?} — attach a DWG/DXF as XRef at a point
+      detach — data: {name} — remove the reference definition and its inserts
+      reload — data: {name} — re-read the referenced file
+    """
+    data = data or {}
+    backend = await get_backend()
+    known_operations = {"list", "attach", "detach", "reload"}
+    if operation not in known_operations:
+        return tool_error(f"Unknown xref operation: {operation}", code="E_UNSUPPORTED_OPERATION")
+    mutating = operation != "list"
+    if mutating:
+        guard = await _guard_mutation(
+            backend, doc_id, expected_revision, lease_token, worker_generation
+        )
+        if not guard.ok:
+            return await add_screenshot_if_available(guard, False)
+        replay = _begin_journaled_mutation(
+            idempotency_key,
+            operation=f"xref.{operation}",
+            request={"operation": operation, "doc_id": doc_id, "data": data},
+            context=guard.payload,
+        )
+        if replay is not None:
+            return await add_screenshot_if_available(replay, False)
+
+    if operation == "list":
+        result = await backend.xref_list()
+    elif operation == "attach":
+        if not str(data.get("path", "")).strip():
+            return tool_error("xref.attach requires data.path", code="E_PARAMETER_REJECTED")
+        result = await backend.xref_attach(
+            data["path"],
+            float(data.get("x", 0.0)),
+            float(data.get("y", 0.0)),
+            data.get("name"),
+        )
+    elif operation == "detach":
+        if not str(data.get("name", "")).strip():
+            return tool_error("xref.detach requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.xref_detach(data["name"])
+    elif operation == "reload":
+        if not str(data.get("name", "")).strip():
+            return tool_error("xref.reload requires data.name", code="E_PARAMETER_REJECTED")
+        result = await backend.xref_reload(data["name"])
+    if mutating:
+        result = await _attach_document_context(backend, result, doc_id=doc_id, mutated=True)
+        result = _finish_journaled_mutation(idempotency_key, result)
+    return await add_screenshot_if_available(result, include_screenshot)
 
 
 # ==========================================================================

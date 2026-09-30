@@ -202,3 +202,30 @@
 The server uses standard MCP stdio and can be registered in Codex, Claude Code,
 Claude Desktop, Cursor, or any compatible client. This workstation uses the
 `file_ipc` backend and a local D-drive output override.
+
+## Fork modernization (PortnovAlex80, 2026-10-01, v4.1)
+
+81. Five new consolidated tools: `inquiry` (read-only measurements:
+    distance/area/angle/length/bbox/summary), `style` (text styles, dimension
+    styles with a numeric whitelist, linetypes), `layout` (paper-space layouts
+    and viewports), `table` (schedules and specification grids), and `xref`
+    (attach/list/reload/detach external references, `destructiveHint`).
+82. `entity` gains `create_spline` (fit-point splines with clamped degree and
+    a strict immutable contract), read-only `select` (type/layer/window
+    filters, bounded handle lists), `stretch` (crossing-window vertex moves),
+    and `explode` (INSERT → block content, LWPOLYLINE → line segments).
+83. DXF version control: `drawing(create, version=...)` creates documents in
+    R12–R2018, and `save_as_dxf(version=...)` converts on export through the
+    ezdxf Importer add-on; unsupported versions fail with
+    `E_PARAMETER_REJECTED`.
+84. Dimensions honor the dimension style chosen via
+    `style.dimstyle_set_current` instead of an implicit renderer default.
+85. The ezdxf backend draws tables as a deterministic composite grid (lines +
+    text cells) with a table manifest; structural edits (column widths, row
+    heights) rebuild the grid and return a new anchor handle.
+86. New offline test suite `tests/test_modernization.py` (45 tests) covers
+    all of the above without AutoCAD; full suite: 338 tests green.
+87. Added `skills/railway-design/` — an agent skill for Russian railway
+    design (track plan, longitudinal profile, cant diagrams, turnouts,
+    ПИКЕТАЖ) driven by this MCP's tools plus deterministic calculation
+    scripts.

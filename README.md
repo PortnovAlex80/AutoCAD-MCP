@@ -2,8 +2,17 @@
 
 **Reliable AutoCAD automation for AI agents, with checked geometry, native 3D, and delivery evidence.**
 
+> **Fork (modernization, v4.1):** this repository extends
+> [beiming183-cloud/AutoCAD-MCP](https://github.com/beiming183-cloud/AutoCAD-MCP)
+> toward full everyday AutoCAD coverage for agents: inquiry measurements, named
+> styles (text/dimension/linetype), paper-space layouts and viewports, tables,
+> external references (XRefs), splines, entity selection filters, explode and
+> stretch, and DXF version control on create/export. It also adds the
+> `railway-design` skill for Russian railway plan/profile drafting — see
+> `skills/railway-design/`.
+
 [![Tests](https://github.com/beiming183-cloud/AutoCAD-MCP/actions/workflows/tests.yml/badge.svg)](https://github.com/beiming183-cloud/AutoCAD-MCP/actions/workflows/tests.yml)
-[![Version](https://img.shields.io/badge/version-4.0.0-0B7285)](https://github.com/beiming183-cloud/AutoCAD-MCP/releases)
+[![Version](https://img.shields.io/badge/version-4.1.0--fork-0B7285)](https://github.com/PortnovAlex80/AutoCAD-MCP)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-2F855A)](LICENSE)
 
@@ -57,7 +66,7 @@ rendering and final rotation so no viewer or camera motion interrupts capture.
 | **File IPC compatibility** | Windows Python | Full AutoCAD or AutoCAD LT 2024+ | COM/LISP coverage, topology audit, PDF and PNG |
 | **ezdxf** | Any platform | No (headless) | Structured audit + deterministic PNG |
 
-The server exposes **12 consolidated tools** (`drawing`, `entity`, `solid`, `product`, `layer`, `block`, `annotation`, `pid`, `transaction`, `view`, `job`, `system`) over standard MCP stdio.
+The server exposes **17 consolidated tools** (`drawing`, `entity`, `solid`, `product`, `layer`, `block`, `annotation`, `inquiry`, `style`, `layout`, `table`, `xref`, `pid`, `transaction`, `view`, `job`, `system`) over standard MCP stdio.
 
 This edition is based on [puran-water/autocad-mcp](https://github.com/puran-water/autocad-mcp) and retains its MIT license. Version 4.0 adds a native transactional worker, client-independent named-pipe protocol, external desktop supervisor, durable idempotency journal, and database-owned document revisions while retaining COM/LISP compatibility.
 
@@ -233,7 +242,7 @@ You should see `backend: "file_ipc"` if AutoCAD is running, or `backend: "ezdxf"
 | `open` | Open an existing drawing | Yes | Yes (DXF) |
 | `info` | Get entity count and layers | Yes | Yes |
 | `save` | Save current drawing (to path if given) | Yes | Yes |
-| `save_as_dxf` | Export as DXF without switching the active DWG | Yes | Yes |
+| `save_as_dxf` | Export as DXF without switching the active DWG; `data.version` (R12…R2018) converts on export (ezdxf backend) | Yes | Yes |
 | `plot_pdf` | Plot to PDF | Yes | No |
 | `render_preview` | True PNG with DPI, force-overwrite, dimensions, and SHA-256 | Yes | Yes |
 | `workspace` | Create and report the managed output workspace | Yes | Yes |
@@ -250,15 +259,19 @@ You should see `backend: "file_ipc"` if AutoCAD is running, or `backend: "ezdxf"
 
 ### `entity` — Entity CRUD + modification
 
-**Create:** `create_line`, `create_circle`, `create_polyline`, `create_rectangle`, `create_arc`, `create_tangent_arc`, `create_ellipse`, `create_mtext`, `create_hatch`, `create_batch`
+**Create:** `create_line`, `create_circle`, `create_polyline`, `create_rectangle`, `create_arc`, `create_tangent_arc`, `create_ellipse`, `create_spline`, `create_mtext`, `create_hatch`, `create_batch`
 
 `create_batch` accepts up to 500 structured entities in one MCP call. It supports line, circle, polyline, rectangle, arc, ellipse, text, mtext, and hatch records. A hatch can use `entity_id: "$last"` to reference the preceding entity. The native worker and headless backend provide atomic batches; the compatibility COM/LISP path uses an AutoCAD undo group and returns rollback evidence, but callers must treat an unverified compensation as a hard stop. This is the preferred high-throughput path; it does not enable arbitrary AutoLISP.
 
 For `ANSI31`, pass `angle: 0` to retain the pattern's native 45-degree section angle. `scale` and hatch `layer` are also explicit parameters. Every HATCH is read back by handle and checked for type, layer, pattern, angle, and scale; a mismatch is erased and returned as `E_POSTCONDITION_MISMATCH`.
 
-**Read:** `list`, `count`, `get`
+**Read:** `list`, `count`, `get`, `select`
 
-**Modify:** `copy`, `move`, `rotate`, `scale`, `mirror`, `offset`\*, `array`, `fillet`\*, `chamfer`\*, `trim`\*, `extend`\*, `break`\*, `join`\*, `constrain`\*, `erase`
+`select` filters entities by `type`, `layer`, and/or `window: [x1,y1,x2,y2]` and returns bounded handle lists (`limit` up to 1000) — the portable replacement for interactive window picks.
+
+**Modify:** `copy`, `move`, `rotate`, `scale`, `mirror`, `offset`\*, `array`, `fillet`\*, `chamfer`\*, `trim`\*, `extend`\*, `break`\*, `join`\*, `constrain`\*, `stretch`, `explode`, `erase`
+
+`stretch` moves the vertices of one entity that fall inside a crossing window (LINE endpoints, LWPOLYLINE vertices, CIRCLE centers; ezdxf backend). `explode` converts an INSERT into its block content or an LWPOLYLINE into LINE segments and returns the new handles.
 
 > \* These native editing operations are File IPC only. `trim` and `extend` require explicit entity IDs and pick points so AutoCAD never guesses which side to keep.
 
@@ -313,6 +326,38 @@ The 3D protocol borrows proven patterns from [build123d](https://github.com/gumy
 ### `annotation` — Text, dimensions, leaders
 
 `create_text`, `create_dimension_linear`, `create_dimension_aligned`, `create_dimension_angular`, `create_dimension_radius`, `create_leader`
+
+New dimensions are drawn with the dimension style selected through `style.dimstyle_set_current`.
+
+### `inquiry` — Read-only measurements (fork)
+
+`distance`, `area`, `angle`, `length`, `bbox`, `summary`
+
+Distance/angle work everywhere (pure geometry). `area` accepts a closed entity handle or a point list; `length` flattens curves (lines, polylines, arcs, circles, splines); `bbox` bounds one entity, one layer, or the whole drawing; `summary` returns counts by type/layer plus extents. Agents use these to verify designs numerically instead of trusting coordinates blindly.
+
+### `style` — Named styles (fork)
+
+`textstyle_list`, `textstyle_create`, `textstyle_set_current`, `dimstyle_list`, `dimstyle_create`, `dimstyle_set_current`, `linetype_list`, `linetype_create`
+
+`dimstyle_create` accepts a whitelist of numeric DIMSTYLE variables (`dimtxt`, `dimasz`, `dimtad`, `dimlfac`, …); unknown keys are reported in `rejected` instead of failing silently.
+
+### `layout` — Paper space layouts and viewports (fork)
+
+`list`, `create`, `set_current`, `add_viewport`
+
+`add_viewport` places a viewport window (`center`, `width`, `height`) on a layout showing model space at `view_center`/`view_height`; the effective plot scale is returned as `height / view_height`.
+
+### `table` — Tables (fork)
+
+`create`, `set_cell`, `set_col_widths`, `set_row_heights`
+
+Creates schedule/specification/picket grids from `rows`/`cols` plus optional `cells` text and a `title`. The ezdxf backend draws a composite grid (lines + text cells, payload `representation: "composite_grid"`); the File IPC backend uses native AutoCAD TABLE entities (`native_table`). Operations address the table through its anchor handle.
+
+### `xref` — External references (fork)
+
+`list`, `attach`, `detach`, `reload`
+
+Attach a DWG/DXF as an external reference at a point, list references with paths, re-read updated source files, and detach cleanly (removes inserts and the definition). Marked `destructiveHint` in tool annotations.
 
 ### `pid` — P&ID operations (CTO symbol library)
 

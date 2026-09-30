@@ -282,11 +282,14 @@ class AutoCADBackend(ABC):
     async def drawing_copy_dwg(self, path: str) -> CommandResult:
         return CommandResult(ok=False, error="Read-only DWG copy is not supported on this backend")
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(self, path: str, version: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def drawing_create(
-        self, name: str | None = None, idempotency_key: str | None = None
+        self,
+        name: str | None = None,
+        idempotency_key: str | None = None,
+        version: str | None = None,
     ) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
@@ -885,6 +888,32 @@ class AutoCADBackend(ABC):
     ) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
+    async def create_spline(
+        self,
+        points: list[list[float]],
+        layer: str | None = None,
+        degree: int = 3,
+        closed: bool = False,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def entity_select(self, filters: dict[str, Any]) -> CommandResult:
+        """Read-only selection by type/layer/window filters; returns handles."""
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def entity_explode(self, entity_id: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def entity_stretch(
+        self,
+        entity_id: str,
+        window: list[float],
+        dx: float,
+        dy: float,
+    ) -> CommandResult:
+        """Move the vertices of one entity that fall inside a crossing window."""
+        return CommandResult(ok=False, error="Not supported on this backend")
+
     # --- Native 3D solid operations ---
 
     async def solid_create_box(
@@ -1093,6 +1122,142 @@ class AutoCADBackend(ABC):
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def pid_insert_tank(self, x: float, y: float, tank_type: str, scale: float = 1.0, attributes: dict[str, str] | None = None) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Inquiry (read-only measurements) ---
+
+    async def inquiry_distance(self, p1: list[float], p2: list[float]) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def inquiry_area(
+        self,
+        entity_id: str | None = None,
+        points: list[list[float]] | None = None,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def inquiry_angle(
+        self, vertex: list[float], p1: list[float], p2: list[float]
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def inquiry_length(self, entity_id: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def inquiry_bbox(
+        self, entity_id: str | None = None, layer: str | None = None
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def inquiry_summary(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Styles (text, dimension, linetype) ---
+
+    async def textstyle_list(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def textstyle_create(
+        self,
+        name: str,
+        font: str = "arial.ttf",
+        fixed_height: float | None = None,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def textstyle_set_current(self, name: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def dimstyle_list(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def dimstyle_create(
+        self, name: str, values: dict[str, Any] | None = None
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def dimstyle_set_current(self, name: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def linetype_list(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def linetype_create(
+        self,
+        name: str,
+        pattern: list[float] | None = None,
+        description: str = "",
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Layouts (paper space) ---
+
+    async def layout_list(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def layout_create(self, name: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def layout_set_current(self, name: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def layout_add_viewport(
+        self,
+        layout: str,
+        center: list[float],
+        width: float,
+        height: float,
+        view_center: list[float],
+        view_height: float,
+        layer: str | None = None,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Tables ---
+
+    async def table_create(
+        self,
+        x: float,
+        y: float,
+        rows: int,
+        cols: int,
+        row_height: float = 1.0,
+        col_width: float = 10.0,
+        title: str | None = None,
+        cells: list[list[str]] | None = None,
+        layer: str | None = None,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def table_set_cell(
+        self, entity_id: str, row: int, col: int, text: str
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def table_set_col_widths(
+        self, entity_id: str, widths: list[float]
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def table_set_row_heights(
+        self, entity_id: str, heights: list[float]
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- External references ---
+
+    async def xref_list(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def xref_attach(
+        self, path: str, x: float = 0.0, y: float = 0.0, name: str | None = None
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def xref_detach(self, name: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def xref_reload(self, name: str) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     # --- View ---

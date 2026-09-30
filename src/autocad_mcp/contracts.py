@@ -125,6 +125,7 @@ ENTITY_FIELDS: dict[str, tuple[set[str], set[str]]] = {
     "rectangle": ({"x1", "y1", "x2", "y2"}, set()),
     "arc": ({"cx", "cy", "radius", "start_angle", "end_angle"}, set()),
     "ellipse": ({"cx", "cy", "major_x", "major_y", "ratio"}, set()),
+    "spline": ({"points"}, {"degree"}),
     "mtext": ({"x", "y", "width", "text"}, {"height"}),
     "text": ({"x", "y", "text"}, {"height", "rotation"}),
 }
@@ -192,6 +193,18 @@ def build_entity_expectation(
         points = tuple(_point(point, f"points[{index}]") for index, point in enumerate(raw_points))
         entity_type = "LWPOLYLINE"
         fields = (("points", points), ("closed", bool(copied.get("closed", False))))
+    elif kind == "spline":
+        raw_points = copied["points"]
+        if not isinstance(raw_points, (list, tuple)) or len(raw_points) < 3:
+            raise ValueError("spline requires at least three fit points")
+        points = tuple(_point(point, f"points[{index}]") for index, point in enumerate(raw_points))
+        degree = int(_number(copied.get("degree", 3), "degree"))
+        if degree < 1 or degree > max(1, len(points) - 1):
+            raise ValueError(
+                f"spline degree must be in [1, {max(1, len(points) - 1)}] for {len(points)} points"
+            )
+        entity_type = "SPLINE"
+        fields = (("points", points), ("degree", degree))
     elif kind == "arc":
         radius = _number(copied["radius"], "radius")
         if radius <= 0:
